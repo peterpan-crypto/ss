@@ -1,5 +1,6 @@
 // ======= ROUTE FINDER =======
 // Dependencies: constants.js, state.js, cells.js, tracktable.js
+
 // Graph caching with state hash
 let cachedGraph = null;
 let cachedGridStateHash = null;
@@ -98,7 +99,9 @@ const TRANSFER_PENALTY = 5;
 function getHeuristic(fromKey, toKey) {
     const [x1, y1] = fromKey.split(',').map(Number);
     const [x2, y2] = toKey.split(',').map(Number);
-    return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) / TRAIN_SPEED;
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    return (Math.abs(dx - dy) + Math.min(dx, dy) * Math.SQRT2) / TRAIN_SPEED;
 }
 
 function reconstructRoute(visited, toKey) {
@@ -197,16 +200,19 @@ function buildStationGraph() {
             const visited = new Set([sk]); const queue = [{key: sk, dist: 0}];
             while (queue.length > 0) {
                 const {key: curr, dist} = queue.shift();
+                const [cx, cy] = curr.split(',').map(Number);
                 for (const nk of getNeighbors(curr)) {
                     if (visited.has(nk)) continue; visited.add(nk);
+                    const [nx, ny] = nk.split(',').map(Number);
+                    const stepCost = (cx !== nx && cy !== ny) ? Math.SQRT2 : 1;
                     const nc = cellsMap.get(nk);
                     if (nc && nc.hasStation && nc.stationName && nk !== sk) {
                         if (!graph.has(sk)) graph.set(sk, []);
                         if (!graph.get(sk).some(e => e.to === nk && e.color === color))
-                            graph.get(sk).push({ to: nk, color, viaTransfer: false, distance: dist + 1 });
+                            graph.get(sk).push({ to: nk, color, viaTransfer: false, distance: dist + stepCost });
                         // Stop at intermediate stations — don't expand through them
                     } else {
-                        queue.push({key: nk, dist: dist + 1});
+                        queue.push({key: nk, dist: dist + stepCost});
                     }
                 }
             }
