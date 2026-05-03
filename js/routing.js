@@ -1,6 +1,5 @@
 // ======= ROUTE FINDER =======
 // Dependencies: constants.js, state.js, cells.js, tracktable.js
-
 // Graph caching with state hash
 let cachedGraph = null;
 let cachedGridStateHash = null;
@@ -93,18 +92,13 @@ class MinPriorityQueue {
     }
 }
 
-function compareRouteScores(a, b) {
-    if (a.transfers !== b.transfers) return a.transfers - b.transfers;
-    if (a.rideStops !== b.rideStops) return a.rideStops - b.rideStops;
-    return a.totalSteps - b.totalSteps;
-}
+const TRAIN_SPEED = 1;
+const TRANSFER_PENALTY = 5;
 
-function nextRouteScore(score, edge) {
-    return {
-        transfers: score.transfers + (edge.viaTransfer ? 1 : 0),
-        rideStops: score.rideStops + (edge.viaTransfer ? 0 : 1),
-        totalSteps: score.totalSteps + 1
-    };
+function getHeuristic(fromKey, toKey) {
+    const [x1, y1] = fromKey.split(',').map(Number);
+    const [x2, y2] = toKey.split(',').map(Number);
+    return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) / TRAIN_SPEED;
 }
 
 function reconstructRoute(visited, toKey) {
@@ -200,19 +194,19 @@ function buildStationGraph() {
         cellsMap.forEach((c, k) => { if (c.hasStation && c.stationName) stationsInColor.push(k); });
 
         stationsInColor.forEach(sk => {
-            const visited = new Set([sk]); const queue = [sk];
+            const visited = new Set([sk]); const queue = [{key: sk, dist: 0}];
             while (queue.length > 0) {
-                const curr = queue.shift();
+                const {key: curr, dist} = queue.shift();
                 for (const nk of getNeighbors(curr)) {
                     if (visited.has(nk)) continue; visited.add(nk);
                     const nc = cellsMap.get(nk);
                     if (nc && nc.hasStation && nc.stationName && nk !== sk) {
                         if (!graph.has(sk)) graph.set(sk, []);
                         if (!graph.get(sk).some(e => e.to === nk && e.color === color))
-                            graph.get(sk).push({ to: nk, color, viaTransfer: false });
+                            graph.get(sk).push({ to: nk, color, viaTransfer: false, distance: dist + 1 });
                         // Stop at intermediate stations — don't expand through them
                     } else {
-                        queue.push(nk);
+                        queue.push({key: nk, dist: dist + 1});
                     }
                 }
             }
@@ -224,8 +218,8 @@ function buildStationGraph() {
         if (fc && tc && fc.hasStation && tc.hasStation) {
             if (!graph.has(conn.from)) graph.set(conn.from, []);
             if (!graph.has(conn.to)) graph.set(conn.to, []);
-            if (!graph.get(conn.from).some(e => e.to === conn.to && e.viaTransfer)) graph.get(conn.from).push({ to: conn.to, color: null, viaTransfer: true });
-            if (!graph.get(conn.to).some(e => e.to === conn.from && e.viaTransfer)) graph.get(conn.to).push({ to: conn.from, color: null, viaTransfer: true });
+            if (!graph.get(conn.from).some(e => e.to === conn.to && e.viaTransfer)) graph.get(conn.from).push({ to: conn.to, color: null, viaTransfer: true, distance: 0 });
+            if (!graph.get(conn.to).some(e => e.to === conn.from && e.viaTransfer)) graph.get(conn.to).push({ to: conn.from, color: null, viaTransfer: true, distance: 0 });
         }
     });
     return graph;
@@ -235,37 +229,43 @@ function findRoute(fromKey, toKey) {
     const graph = getCachedGraph();
     if (!graph.has(fromKey) || !graph.has(toKey)) return null;
 
-    const visited = new Map();
-    const processed = new Set();
-    const bestScores = new Map();
-    const queue = new MinPriorityQueue((a, b) => compareRouteScores(a.score, b.score));
-    const startScore = { transfers: 0, rideStops: 0, totalSteps: 0 };
+    const open_queue = new MinPriorityQueue((a, b) => a.f_score - b.f_score);
+    const g_score = new Map();
+    const f_score = new Map();
+    const came_from = new Map();
+    const open_set = new Set();
+    
+    g_score.set(fromKey, 0);
+    f_score.set(fromKey, getHeuristic(fromKey, toKey));
+    
+    open_queue.push({ node: fromKey, f_score: f_score.get(fromKey) });
+    open_set.add(fromKey);
+    came_from.set(fromKey, { prev: null, edgeColor: null, viaTransfer: false });
 
-    bestScores.set(fromKey, startScore);
-    visited.set(fromKey, { prev: null, edgeColor: null, viaTransfer: false });
-    queue.push({ node: fromKey, score: startScore });
+    while (open_queue.size > 0) {
+        const currentItem = open_queue.pop();
+        const current = currentItem.node;
+        open_set.delete(current);
 
-    while (queue.size > 0) {
-        const current = queue.pop();
-        const curr = current.node;
-
-        if (processed.has(curr)) continue;
-        processed.add(curr);
-
-        if (curr === toKey) {
-            return reconstructRoute(visited, toKey);
+        if (current === toKey) {
+            return reconstructRoute(came_from, toKey);
         }
 
-        for (const edge of (graph.get(curr) || [])) {
-            if (processed.has(edge.to)) continue;
-
-            const candidateScore = nextRouteScore(bestScores.get(curr), edge);
-            const existingScore = bestScores.get(edge.to);
-
-            if (!existingScore || compareRouteScores(candidateScore, existingScore) < 0) {
-                bestScores.set(edge.to, candidateScore);
-                visited.set(edge.to, { prev: curr, edgeColor: edge.color, viaTransfer: edge.viaTransfer });
-                queue.push({ node: edge.to, score: candidateScore });
+        for (const edge of (graph.get(current) || [])) {
+            const edge_cost = edge.viaTransfer ? TRANSFER_PENALTY : (edge.distance / TRAIN_SPEED);
+            const tentative_g_score = g_score.get(current) + edge_cost;
+            
+            const neighbor_g_score = g_score.has(edge.to) ? g_score.get(edge.to) : Infinity;
+            if (tentative_g_score < neighbor_g_score) {
+                came_from.set(edge.to, { prev: current, edgeColor: edge.color, viaTransfer: edge.viaTransfer });
+                g_score.set(edge.to, tentative_g_score);
+                const neighbor_f_score = tentative_g_score + getHeuristic(edge.to, toKey);
+                f_score.set(edge.to, neighbor_f_score);
+                
+                if (!open_set.has(edge.to)) {
+                    open_queue.push({ node: edge.to, f_score: neighbor_f_score });
+                    open_set.add(edge.to);
+                }
             }
         }
     }
